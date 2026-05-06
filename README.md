@@ -145,7 +145,7 @@ Project Images:
 
 ![alt text](livepage.png)
 
-![alt text](<Closed incident.png>)
+![alt text](<Closed incident-1.png>)
 
 ![alt text](resolvemarked.png)
 
@@ -154,3 +154,4 @@ Project Images:
 ![alt text](report.png)
 
 The full OpenAPI documentation is available at [http://localhost:8000/docs](http://localhost:8000/docs) when the application is running.
+
