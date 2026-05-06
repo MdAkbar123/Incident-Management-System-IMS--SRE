@@ -33,7 +33,7 @@ def upgrade() -> None:
         sa.Column("work_item_id",        sa.String(26), sa.ForeignKey("work_items.id"), nullable=False, unique=True),
         sa.Column("start_time",          sa.DateTime(timezone=True), nullable=False),
         sa.Column("end_time",            sa.DateTime(timezone=True), nullable=False),
-        sa.Column("root_cause_category", sa.Enum("Infrastructure","Code bug","Config change","Dependency failure","Unknown"), nullable=False),
+        sa.Column("root_cause_category", sa.Enum("INFRASTRUCTURE","CODE_BUG","CONFIG_CHANGE","DEPENDENCY_FAILURE","UNKNOWN"), nullable=False),
         sa.Column("fix_applied",         sa.Text(), nullable=False),
         sa.Column("prevention_steps",    sa.Text(), nullable=False),
         sa.Column("mttr_seconds",        sa.Float(), nullable=False),
