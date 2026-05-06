@@ -13,6 +13,13 @@ class StatusUpdate(BaseModel):
     }
 
 
+class CorrelationInfo(BaseModel):
+    """Embedded in WorkItemDetailResponse when incident is cascaded from root."""
+    is_cascaded_from: str  # root incident ID
+    root_component: str  # component type of root
+    reason: str  # correlation reason
+
+
 class WorkItemResponse(BaseModel):
     id: str
     component_id: str
@@ -27,6 +34,7 @@ class WorkItemResponse(BaseModel):
     # None until that transition occurs — the frontend must not
     # fall back to created_at if this is None.
     resolved_at: Optional[datetime] = None
+    correlation: Optional[CorrelationInfo] = None
 
     # Serialise all datetime fields as UTC ISO-8601 strings with explicit
     # 'Z' suffix (e.g. "2026-05-06T10:30:00Z") so the frontend always

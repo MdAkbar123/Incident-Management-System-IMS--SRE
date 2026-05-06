@@ -139,10 +139,11 @@ const handleError = (error) => {
  * Sorted by priority (P0 first), cached by backend.
  * Retried on network errors.
  */
-export const fetchIncidents = () =>
-  withRetry(() => 
-    http.get('/incidents').then(r => r.data).catch(handleError)
-  )
+export const fetchIncidents = (fetch_correlated = false) =>
+  withRetry(() => {
+    const url = fetch_correlated ? '/incidents?correlated=true' : '/incidents';
+    return http.get(url).then(r => r.data).catch(handleError)
+  })
 
 /**
  * Fetch incident detail including RCA if present.

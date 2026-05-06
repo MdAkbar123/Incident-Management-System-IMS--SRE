@@ -28,7 +28,7 @@ export default function LiveFeed() {
   }
 
   const load = () => {
-    fetchIncidents()
+    fetchIncidents(true)
       .then(d => {
         setData(d)
         setError(null)
