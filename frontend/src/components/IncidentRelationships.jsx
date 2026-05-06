@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import styles from './IncidentRelationships.module.css'
+import { Badge } from './Badge'
 import { Link } from 'react-router-dom'
 
 /**

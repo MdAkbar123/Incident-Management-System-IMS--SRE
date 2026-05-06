@@ -157,33 +157,23 @@ async def _process_signal(signal: SignalIngest):
                     await save_relationships(root_causes + cascades)
                     log.info(
                         "incident_correlations_detected",
-                        incident_id=work_item_id,
-                        root_causes_count=len(root_causes),
-                        cascades_count=len(cascades),
+                        work_item_id=work_item_id,
+                        root_causes=len(root_causes),
+                        cascades=len(cascades),
                     )
             except Exception as e:
                 log.warning(
                     "correlation_detection_failed",
-                    incident_id=work_item_id,
+                    work_item_id=work_item_id,
                     error=str(e),
                 )
 
         except Exception as e:
-            # Log exception but avoid structlog parameter binding conflict
-            try:
-                incident_context = work_item_id if work_item_id else "N/A"
-                log.error(
-                    "work_item_processing_failed",
-                    incident_id=incident_context,
-                    signal_id=signal.signal_id,
-                    error_type=type(e).__name__,
-                    error_detail=str(e)[:200],
-                )
-            except Exception as log_err:
-                # If logging fails, print directly to stderr
-                import sys
-                print(f"LOGGING ERROR: {log_err}", file=sys.stderr)
-                print(f"ORIGINAL ERROR: {e}", file=sys.stderr)
+            log.error(
+                "work_item_creation_failed",
+                error=str(e),
+                signal_id=signal.signal_id
+            )
     else:
         work_item_id = existing_work_item_id
         if work_item_id:

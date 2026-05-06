@@ -26,7 +26,7 @@ class IncidentRelationshipResponse(BaseModel):
         description="How relationship was detected: dependency_graph, temporal, semantic"
     )
     reason: str = Field(..., description="Human-readable explanation")
-    created_at: Optional[datetime] = Field(None, description="When relationship was detected")
+    created_at: datetime = Field(..., description="When relationship was detected")
 
 
 class IncidentCorrelationResponse(BaseModel):

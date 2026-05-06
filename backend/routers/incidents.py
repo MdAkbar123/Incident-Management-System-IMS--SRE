@@ -10,7 +10,7 @@ from db.mysql import AsyncSessionLocal
 from db.redis import get_redis
 from db.mongo import get_db
 from db.influx_writer import write_incident_resolution
-from models import WorkItem, RCA, RootCauseCategory, WorkItemStatus
+from models import WorkItem, RCA, RootCauseCategory
 from schemas.incident import (
     StatusUpdate,
     WorkItemResponse,
@@ -135,7 +135,7 @@ async def _write_rca_and_close(
             session.add(rca)
 
             # Transition work item to CLOSED
-            work_item.status = WorkItemStatus.CLOSED
+            work_item.status = "CLOSED"
 
             await session.flush()
             await session.refresh(work_item)

@@ -6,13 +6,9 @@
 
 :root {
   --bg:          #f8f8f7;
-  --bg-primary:  #ffffff;
-  --bg-secondary:#f5f3f0;
   --surface:     #ffffff;
   --border:      #e4e2da;
-  --border-color:#e4e2da;
   --text:        #1a1a18;
-  --text-primary:#1a1a18;
   --text-muted:  #6b6b65;
   --accent:      #2563eb;
   --accent-hover:#1d4ed8;
