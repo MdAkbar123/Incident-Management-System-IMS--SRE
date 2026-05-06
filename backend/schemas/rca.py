@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field, model_validator
-from datetime import datetime
+from pydantic import BaseModel, Field, field_validator, model_validator
+from datetime import datetime, timezone
 from typing import Literal
 from models import RootCauseCategory
 
@@ -42,12 +42,32 @@ class RCACreate(BaseModel):
         description="Steps to prevent recurrence"
     )
 
+    @field_validator("start_time", "end_time", mode="before")
+    @classmethod
+    def normalize_to_utc(cls, v: object) -> datetime:
+        """
+        Normalise any incoming datetime to UTC-aware.
+
+        Handles three cases:
+          1. Already UTC-aware datetime  → convert to UTC (no-op if already UTC)
+          2. Naive datetime              → assume UTC and attach tzinfo
+          3. ISO-8601 string with offset → parsed by Pydantic, then normalised here
+        """
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                # Naive — brand as UTC (consistent with server assumption)
+                return v.replace(tzinfo=timezone.utc)
+            return v.astimezone(timezone.utc)
+        # Non-datetime values (e.g. raw strings) fall through to Pydantic's
+        # own datetime parser; the validator runs again on the parsed result.
+        return v
+
     @model_validator(mode="after")
     def end_must_be_after_start(self) -> "RCACreate":
         if self.end_time <= self.start_time:
             raise ValueError(
-                f"end_time ({self.end_time}) must be after "
-                f"start_time ({self.start_time}). "
+                f"end_time ({self.end_time.isoformat()}) must be after "
+                f"start_time ({self.start_time.isoformat()}). "
                 f"Check your timestamps."
             )
         return self

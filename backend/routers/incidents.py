@@ -30,6 +30,8 @@ from core.retry import with_retry
 from core.debounce import update_incident_cache
 from core.timeline import get_timeline
 from core.correlation import find_related_incidents
+from datetime import datetime,timezone
+
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/incidents", tags=["incidents"])
@@ -69,8 +71,11 @@ async def _write_rca_and_close(
     Transactional: write RCA + transition work item to CLOSED.
     Both succeed or both roll back.
     Retried up to 3 times on DB errors.
+    
+    Note: MTTR is calculated from incident detection (created_at) to closure time,
+    not from the user-provided RCA start_time/end_time.
+    The RCA times represent the user's assessment of the actual incident window.
     """
-    mttr_seconds = (body.end_time - body.start_time).total_seconds()
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -119,6 +124,23 @@ async def _write_rca_and_close(
                     f"An RCA already exists for incident {incident_id}."
                 )
 
+            # Capture creation time before closure (for MTTR calculation)
+            incident_created_at = work_item.created_at
+
+            # Transition work item to CLOSED
+            work_item.status = WorkItemStatus.CLOSED
+
+            # Calculate MTTR: time from incident detection to closure
+            # This is the actual response time, not the RCA assessment window
+            # Ensure both datetimes are timezone-aware for subtraction
+            current_time = datetime.now(timezone.utc)
+            # astimezone() handles both naive (assumes UTC after MySQL fix above)
+            # and already-aware datetimes safely
+            if incident_created_at.tzinfo is None:
+                incident_created_at = incident_created_at.replace(tzinfo=timezone.utc)
+            else:
+                incident_created_at = incident_created_at.astimezone(timezone.utc)
+            mttr_seconds = (current_time - incident_created_at).total_seconds()
             # Create RCA record
             # body.root_cause_category is already the correct RootCauseCategory enum from models
             # Pass it directly — no conversion needed
@@ -133,9 +155,6 @@ async def _write_rca_and_close(
                 mttr_seconds=mttr_seconds,
             )
             session.add(rca)
-
-            # Transition work item to CLOSED
-            work_item.status = WorkItemStatus.CLOSED
 
             await session.flush()
             await session.refresh(work_item)
@@ -234,6 +253,7 @@ async def get_incident(incident_id: str):
         signal_count=work_item.signal_count,
         created_at=work_item.created_at,
         updated_at=work_item.updated_at,
+        resolved_at=work_item.resolved_at,
         rca=rca_summary,
     )
 
@@ -285,6 +305,11 @@ async def update_status(incident_id: str, body: StatusUpdate):
                 )
 
             work_item.status = new_state.name
+            if new_state.name == "RESOLVED":
+                work_item.resolved_at = datetime.now(timezone.utc)
+
+            await session.flush()
+            await session.refresh(work_item)            
             await session.flush()
             await session.refresh(work_item)
 
@@ -489,6 +514,24 @@ async def get_related_incidents(
     """
     root_causes, cascades = await find_related_incidents(incident_id, time_window_seconds)
     
+    # Load related work items to get their creation times
+    async with AsyncSessionLocal() as session:
+        # Collect all related incident IDs
+        related_ids = set()
+        for r in root_causes:
+            related_ids.add(r.source_incident_id)
+        for r in cascades:
+            related_ids.add(r.target_incident_id)
+        
+        # Load all related work items
+        if related_ids:
+            result = await session.execute(
+                select(WorkItem).where(WorkItem.id.in_(related_ids))
+            )
+            work_items_map = {wi.id: wi for wi in result.scalars()}
+        else:
+            work_items_map = {}
+    
     return IncidentCorrelationResponse(
         incident_id=incident_id,
         root_causes=[
@@ -500,7 +543,7 @@ async def get_related_incidents(
                 "confidence": r.confidence,
                 "detection_method": r.detection_method,
                 "reason": r.reason,
-                "created_at": r.created_at,
+                "created_at": work_items_map.get(r.source_incident_id).created_at if work_items_map.get(r.source_incident_id) else r.created_at,
             }
             for r in root_causes
         ],
@@ -513,7 +556,7 @@ async def get_related_incidents(
                 "confidence": r.confidence,
                 "detection_method": r.detection_method,
                 "reason": r.reason,
-                "created_at": r.created_at,
+                "created_at": work_items_map.get(r.target_incident_id).created_at if work_items_map.get(r.target_incident_id) else r.created_at,
             }
             for r in cascades
         ],

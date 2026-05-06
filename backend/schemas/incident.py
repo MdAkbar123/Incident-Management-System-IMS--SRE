@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from datetime import datetime
+from pydantic import BaseModel, field_serializer
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -23,6 +23,24 @@ class WorkItemResponse(BaseModel):
     signal_count: int
     created_at: datetime
     updated_at: datetime
+    # Stamped server-side when status transitions to RESOLVED.
+    # None until that transition occurs — the frontend must not
+    # fall back to created_at if this is None.
+    resolved_at: Optional[datetime] = None
+
+    # Serialise all datetime fields as UTC ISO-8601 strings with explicit
+    # 'Z' suffix (e.g. "2026-05-06T10:30:00Z") so the frontend always
+    # receives unambiguous UTC, never a bare naive timestamp it could
+    # misinterpret as local time.
+    @field_serializer("created_at", "updated_at", "resolved_at")
+    def serialize_as_utc(self, v: Optional[datetime]) -> Optional[str]:
+        if v is None:
+            return None
+        if v.tzinfo is None:
+            # Naive datetime from DB — brand as UTC (safe after the
+            # MySQL SET time_zone = '+00:00' fix in mysql.py)
+            v = v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     model_config = {"from_attributes": True}
 
@@ -43,6 +61,17 @@ class RCASummary(BaseModel):
     mttr_seconds: float
     mttr_human: str
     submitted_at: datetime
+
+    # Same UTC serialisation applied to all RCA timestamps so the
+    # "Detected at / Resolved at" display in the RCA form is consistent
+    # with the values shown in the incident list.
+    @field_serializer("start_time", "end_time", "submitted_at")
+    def serialize_as_utc(self, v: Optional[datetime]) -> Optional[str]:
+        if v is None:
+            return None
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     model_config = {"from_attributes": True}
 

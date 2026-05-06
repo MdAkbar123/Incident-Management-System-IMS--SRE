@@ -24,6 +24,7 @@ def upgrade() -> None:
         sa.Column("signal_count",   sa.Integer(),     nullable=False, server_default="1"),
         sa.Column("created_at",     sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at",     sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("resolved_at",    sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_work_items_component_id", "work_items", ["component_id"])
 

@@ -15,6 +15,9 @@ const TRANSITIONS = {
 
 function formatDate(str) {
   if (!str) return '—'
+  // Backend always sends UTC ISO-8601 with a 'Z' suffix.
+  // new Date() parses that correctly; toLocaleString() converts to
+  // the browser's local timezone for display — intentional.
   return new Date(str).toLocaleString()
 }
 
@@ -31,12 +34,11 @@ export default function IncidentDetail() {
     fetchIncident(id)
       .then(setIncident)
       .catch(e => setError(e.response?.data?.detail ?? e.message))
-    
-    // Fetch timeline (available for active incidents or closed incidents)
+
     fetch(`/api/incidents/${id}/timeline`)
       .then(r => r.json())
       .then(setTimeline)
-      .catch(() => setTimeline(null)) // Silently fail if timeline not available
+      .catch(() => setTimeline(null))
   }
 
   useEffect(() => { load() }, [id])
@@ -70,6 +72,25 @@ export default function IncidentDetail() {
   )
 
   const nextStates = TRANSITIONS[incident.status] ?? []
+
+  // Only show "Resolved at" once the incident has actually been resolved.
+  // incident.resolved_at is null until the RESOLVED transition is stamped
+  // server-side — using updated_at here was the bug (it's set on creation).
+  const isResolved = ['RESOLVED', 'CLOSED'].includes(incident.status)
+
+  const detailRows = [
+    ['Component type', incident.component_type],
+    ['Priority',       incident.priority],
+    ['Status',         incident.status],
+    ['Signal count',   incident.signal_count],
+    ['Detected at',    formatDate(incident.created_at)],
+    // Row is only included when the incident has reached RESOLVED/CLOSED
+    // and a real resolved_at timestamp exists on the object.
+    ...(isResolved
+      ? [['Resolved at', formatDate(incident.resolved_at)]]
+      : []
+    ),
+  ]
 
   return (
     <div className="page">
@@ -145,14 +166,7 @@ export default function IncidentDetail() {
                        marginBottom: 16 }}>Incident details</h2>
           <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr',
                        gap: '8px 20px', fontSize: 14 }}>
-            {[
-              ['Component type', incident.component_type],
-              ['Priority',       incident.priority],
-              ['Status',         incident.status],
-              ['Signal count',   incident.signal_count],
-              ['Created',        formatDate(incident.created_at)],
-              ['Last updated',   formatDate(incident.updated_at)],
-            ].map(([k, v]) => (
+            {detailRows.map(([k, v]) => (
               <>
                 <dt key={`k-${k}`} style={{ color: 'var(--text-muted)',
                                             fontWeight: 500, whiteSpace: 'nowrap' }}>
@@ -173,11 +187,11 @@ export default function IncidentDetail() {
             <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr',
                          gap: '8px 20px', fontSize: 14 }}>
               {[
-                ['MTTR',        incident.rca.mttr_human],
-                ['Category',    incident.rca.root_cause_category],
-                ['Start',       formatDate(incident.rca.start_time)],
-                ['End',         formatDate(incident.rca.end_time)],
-                ['Submitted',   formatDate(incident.rca.submitted_at)],
+                ['MTTR (Detected → Resolved)', incident.rca.mttr_human],
+                ['Category',                   incident.rca.root_cause_category],
+                ['RCA Assessment Start',        formatDate(incident.rca.start_time)],
+                ['RCA Assessment End',          formatDate(incident.rca.end_time)],
+                ['Submitted',                   formatDate(incident.rca.submitted_at)],
               ].map(([k, v]) => (
                 <>
                   <dt key={`r-${k}`} style={{ color: 'var(--text-muted)',
