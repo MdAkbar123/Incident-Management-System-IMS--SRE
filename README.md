@@ -14,10 +14,9 @@ A high-throughput, highly resilient Incident Management System designed to inges
 ---
 
 ## 🏗️ Architecture:
+<img width="1920" height="1080" alt="archdiag2" src="https://github.com/user-attachments/assets/7f2f6827-0315-45b3-b5d6-8ed26e88db3c" />
 
-![alt text](<Screenshot from 2026-05-06 14-13-20-1 copy.png>)
-
-![alt text](<Screenshot from 2026-05-06 15-07-24-1.png>)
+<img width="1920" height="1080" alt="archdiag2" src="https://github.com/user-attachments/assets/21c2ea41-1cba-49c2-b7d4-3a2d55ec9849" />
 
 
 ### Tech Stack
