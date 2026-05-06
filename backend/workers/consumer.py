@@ -17,7 +17,7 @@ from core.debounce import (
 from core.alert_strategy import alert_dispatcher, PRIORITY_MAP, WorkItemSummary
 from core.retry import with_retry
 from core.timeline import get_or_create_timeline, persist_timeline_to_redis
-from core.correlation import find_related_incidents, save_relationships
+from core.correlation import detect_and_store_correlations
 from models import WorkItem, ComponentType, Priority, WorkItemStatus
 import ulid
 
@@ -150,23 +150,16 @@ async def _process_signal(signal: SignalIngest):
             # Persist timeline to Redis for quick access (1 hour TTL)
             await persist_timeline_to_redis(redis, work_item_id)
             
-            # Detect related incidents (background, non-blocking)
-            try:
-                root_causes, cascades = await find_related_incidents(work_item_id)
-                if root_causes or cascades:
-                    await save_relationships(root_causes + cascades)
-                    log.info(
-                        "incident_correlations_detected",
-                        incident_id=work_item_id,
-                        root_causes_count=len(root_causes),
-                        cascades_count=len(cascades),
-                    )
-            except Exception as e:
-                log.warning(
-                    "correlation_detection_failed",
-                    incident_id=work_item_id,
-                    error=str(e),
-                )
+            # Detect correlations: non-blocking, logs internally
+            correlation_count = await detect_and_store_correlations(
+                incident_id=work_item_id,
+                component_type=work_item.component_type.value,
+                component_id=work_item.component_id,
+            )
+            timeline.add_event(
+                "correlation_detection_completed",
+                correlations_found=correlation_count,
+            )
 
         except Exception as e:
             # Log exception but avoid structlog parameter binding conflict

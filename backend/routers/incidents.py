@@ -10,17 +10,17 @@ from db.mysql import AsyncSessionLocal
 from db.redis import get_redis
 from db.mongo import get_db
 from db.influx_writer import write_incident_resolution
-from models import WorkItem, RCA, RootCauseCategory, WorkItemStatus
+from models import WorkItem, RCA, RootCauseCategory, WorkItemStatus, IncidentCorrelation
 from schemas.incident import (
     StatusUpdate,
     WorkItemResponse,
     WorkItemDetailResponse,
     WorkItemListResponse,
     RCASummary,
+    CorrelationInfo,
 )
 from schemas.rca import RCACreate, RCAResponse
 from schemas.timeline import TimelineResponse
-from schemas.correlation import IncidentCorrelationResponse
 from core.state_machine import (
     get_state,
     InvalidTransitionError,
@@ -29,7 +29,6 @@ from core.state_machine import (
 from core.retry import with_retry
 from core.debounce import update_incident_cache
 from core.timeline import get_timeline
-from core.correlation import find_related_incidents
 from datetime import datetime,timezone
 
 
@@ -210,7 +209,7 @@ async def list_incidents():
 @router.get("/{incident_id}", response_model=WorkItemDetailResponse)
 async def get_incident(incident_id: str):
     """
-    Returns full work item detail including RCA if present.
+    Returns full work item detail including RCA if present and correlation metadata.
     """
     async with AsyncSessionLocal() as session:
         wi_result = await session.execute(
@@ -229,6 +228,35 @@ async def get_incident(incident_id: str):
         )
         rca = rca_result.scalar_one_or_none()
 
+        # Query for correlation: is this incident cascaded from a root?
+        # Note: An incident can be cascaded from multiple roots (different components).
+        # Return the first (earliest) one as the primary root cause.
+        cascaded_from_result = await session.execute(
+            select(IncidentCorrelation)
+            .where(IncidentCorrelation.cascaded_incident_id == incident_id)
+            .order_by(IncidentCorrelation.created_at)
+        )
+        cascaded_from_all = cascaded_from_result.scalars().all()
+        cascaded_from = cascaded_from_all[0] if cascaded_from_all else None
+
+        # Query for cascaded incidents: are there any cascaded from this incident?
+        cascaded_incidents_result = await session.execute(
+            select(IncidentCorrelation).where(
+                IncidentCorrelation.root_incident_id == incident_id
+            )
+        )
+        cascaded_incidents = cascaded_incidents_result.scalars().all()
+
+        # If cascaded from a root, fetch the root incident's component type
+        cascaded_from_component = None
+        if cascaded_from:
+            root_result = await session.execute(
+                select(WorkItem).where(WorkItem.id == cascaded_from.root_incident_id)
+            )
+            root_work_item = root_result.scalar_one_or_none()
+            if root_work_item:
+                cascaded_from_component = root_work_item.component_type.value
+
     rca_summary = None
     if rca:
         rca_summary = RCASummary(
@@ -243,6 +271,16 @@ async def get_incident(incident_id: str):
             submitted_at=rca.submitted_at,
         )
 
+    correlation_info = None
+    if cascaded_from:
+        correlation_info = CorrelationInfo(
+            is_cascaded_from=cascaded_from.root_incident_id,
+            root_component=cascaded_from_component or "UNKNOWN",
+            reason=cascaded_from.correlation_reason,
+        )
+
+    cascaded_incident_ids = [ic.cascaded_incident_id for ic in cascaded_incidents]
+
     return WorkItemDetailResponse(
         id=work_item.id,
         component_id=work_item.component_id,
@@ -255,6 +293,8 @@ async def get_incident(incident_id: str):
         updated_at=work_item.updated_at,
         resolved_at=work_item.resolved_at,
         rca=rca_summary,
+        correlation=correlation_info,
+        cascaded_incidents=cascaded_incident_ids,
     )
 
 
@@ -491,74 +531,3 @@ async def get_timeline_endpoint(incident_id: str):
                "or permanently after closure."
     )
 
-
-# ── GET /incidents/{id}/related ──────────────────────────
-
-@router.get("/{incident_id}/related", response_model=IncidentCorrelationResponse)
-async def get_related_incidents(
-    incident_id: str,
-    time_window_seconds: int = 30,
-):
-    """
-    Returns incidents related to this incident via root cause or cascade relationships.
-    
-    Detection methods:
-    - Dependency Graph: Component dependencies (hardcoded topology)
-    - Temporal: Incidents within 30 seconds of each other
-    - Semantic: Similar error patterns
-    
-    Returns:
-    - root_causes: Incidents that likely caused this one
-    - cascaded_incidents: Incidents likely caused by this one
-    - related_incidents: Other temporal/semantic correlations
-    """
-    root_causes, cascades = await find_related_incidents(incident_id, time_window_seconds)
-    
-    # Load related work items to get their creation times
-    async with AsyncSessionLocal() as session:
-        # Collect all related incident IDs
-        related_ids = set()
-        for r in root_causes:
-            related_ids.add(r.source_incident_id)
-        for r in cascades:
-            related_ids.add(r.target_incident_id)
-        
-        # Load all related work items
-        if related_ids:
-            result = await session.execute(
-                select(WorkItem).where(WorkItem.id.in_(related_ids))
-            )
-            work_items_map = {wi.id: wi for wi in result.scalars()}
-        else:
-            work_items_map = {}
-    
-    return IncidentCorrelationResponse(
-        incident_id=incident_id,
-        root_causes=[
-            {
-                "id": r.id,
-                "source_incident_id": r.source_incident_id,
-                "target_incident_id": r.target_incident_id,
-                "relationship_type": r.relationship_type.value,
-                "confidence": r.confidence,
-                "detection_method": r.detection_method,
-                "reason": r.reason,
-                "created_at": work_items_map.get(r.source_incident_id).created_at if work_items_map.get(r.source_incident_id) else r.created_at,
-            }
-            for r in root_causes
-        ],
-        cascaded_incidents=[
-            {
-                "id": r.id,
-                "source_incident_id": r.source_incident_id,
-                "target_incident_id": r.target_incident_id,
-                "relationship_type": r.relationship_type.value,
-                "confidence": r.confidence,
-                "detection_method": r.detection_method,
-                "reason": r.reason,
-                "created_at": work_items_map.get(r.target_incident_id).created_at if work_items_map.get(r.target_incident_id) else r.created_at,
-            }
-            for r in cascades
-        ],
-        related_incidents=[],
-    )

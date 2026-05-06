@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { Fragment, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchIncidents } from '../api/client'
 import { PriorityBadge, StatusBadge } from '../components/Badge'
@@ -15,8 +15,17 @@ export default function LiveFeed() {
   const [error, setError]     = useState(null)
   const [lastRefresh, setLastRefresh] = useState(null)
   const [countdown, setCountdown]     = useState(5)
+  const [expandedRoots, setExpandedRoots] = useState({})  // Track which roots are expanded
   const navigate = useNavigate()
   const intervalRef = useRef(null)
+
+  // Toggle expand/collapse for a root incident
+  const toggleExpand = (rootId) => {
+    setExpandedRoots(prev => ({
+      ...prev,
+      [rootId]: !prev[rootId]
+    }))
+  }
 
   const load = () => {
     fetchIncidents()
@@ -38,6 +47,32 @@ export default function LiveFeed() {
       clearInterval(tick)
     }
   }, [])
+
+  // Group incidents: root incidents and cascaded incidents
+  const groupIncidents = () => {
+    if (!data || !data.incidents) return { roots: [], cascaded: {} }
+    
+    const cascadedMap = {}  // cascaded_id -> root_id
+    const cascadedByRoot = {}  // root_id -> [cascaded_ids]
+    
+    // First pass: identify root incidents and build cascaded map
+    data.incidents.forEach(inc => {
+      if (inc.correlation?.is_cascaded_from) {
+        cascadedMap[inc.id] = inc.correlation.is_cascaded_from
+        if (!cascadedByRoot[inc.correlation.is_cascaded_from]) {
+          cascadedByRoot[inc.correlation.is_cascaded_from] = []
+        }
+        cascadedByRoot[inc.correlation.is_cascaded_from].push(inc.id)
+      }
+    })
+    
+    // Identify root incidents (not cascaded from anything)
+    const roots = data.incidents.filter(inc => !cascadedMap[inc.id])
+    
+    return { roots, cascadedByRoot }
+  }
+
+  const { roots, cascadedByRoot } = groupIncidents()
 
   return (
     <div className="page">
@@ -88,7 +123,7 @@ export default function LiveFeed() {
       )}
 
       {/* Incident table */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="card" style={{ padding: 0, overflowX: 'auto' }}>
         {!data ? (
           <div style={{ padding: 24, color: 'var(--text-muted)' }}>
             <span className="spinner" /> Loading…
@@ -103,9 +138,20 @@ export default function LiveFeed() {
             </div>
           </div>
         ) : (
-          <table>
+          <table className="incident-table">
+            <colgroup>
+              <col className="incident-table__expand" />
+              <col className="incident-table__priority" />
+              <col className="incident-table__component" />
+              <col className="incident-table__type" />
+              <col className="incident-table__status" />
+              <col className="incident-table__signals" />
+              <col className="incident-table__created" />
+              <col className="incident-table__actions" />
+            </colgroup>
             <thead>
               <tr>
+                <th></th>
                 <th>Priority</th>
                 <th>Component</th>
                 <th>Type</th>
@@ -116,30 +162,143 @@ export default function LiveFeed() {
               </tr>
             </thead>
             <tbody>
-              {data.incidents.map(incident => (
+              {/* Render root incidents with their cascaded children */}
+              {roots.map(rootIncident => {
+                const cascadedIds = cascadedByRoot[rootIncident.id] || []
+                const isExpanded = expandedRoots[rootIncident.id] !== false
+                const hasCascaded = cascadedIds.length > 0
+                
+                return (
+                  <Fragment key={rootIncident.id}>
+                    {/* Root incident row */}
+                    <tr
+                      style={{ 
+                        cursor: 'pointer',
+                        backgroundColor: hasCascaded ? 'var(--bg-hover)' : 'transparent'
+                      }}
+                      onClick={() => navigate(`/incidents/${rootIncident.id}`)}
+                    >
+                      <td style={{ width: 24, textAlign: 'center' }}>
+                        {hasCascaded && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleExpand(rootIncident.id)
+                            }}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              fontSize: 14,
+                              color: 'var(--text)',
+                              padding: '0 4px'
+                            }}
+                            title={isExpanded ? 'Collapse' : 'Expand'}
+                          >
+                            {isExpanded ? '▼' : '▶'}
+                          </button>
+                        )}
+                      </td>
+                      <td><PriorityBadge priority={rootIncident.priority} /></td>
+                      <td style={{ fontWeight: 500, fontSize: 14 }}>
+                        {rootIncident.component_id}
+                      </td>
+                      <td>
+                        <code style={{ fontSize: 12, background: 'var(--bg)',
+                                       padding: '2px 6px', borderRadius: 4 }}>
+                          {rootIncident.component_type}
+                        </code>
+                      </td>
+                      <td><StatusBadge status={rootIncident.status} /></td>
+                      <td style={{ fontSize: 14 }}>{rootIncident.signal_count}</td>
+                      <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                        {timeAgo(rootIncident.created_at)}
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        {hasCascaded && (
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)',
+                                         background: 'var(--bg)', padding: '2px 6px',
+                                         borderRadius: 3, marginRight: 8 }}>
+                            {cascadedIds.length} cascaded
+                          </span>
+                        )}
+                        <span style={{ fontSize: 13, color: 'var(--accent)' }}>
+                          View →
+                        </span>
+                      </td>
+                    </tr>
+                    
+                    {/* Cascaded incidents (if expanded) */}
+                    {hasCascaded && isExpanded && cascadedIds.map(cascadedId => {
+                      const cascadedInc = data.incidents.find(i => i.id === cascadedId)
+                      if (!cascadedInc) return null
+                      return (
+                        <tr
+                          key={cascadedId}
+                          style={{
+                            cursor: 'pointer',
+                            backgroundColor: 'var(--bg)',
+                          }}
+                          onClick={() => navigate(`/incidents/${cascadedId}`)}
+                        >
+                          <td style={{ width: 24 }}></td>
+                          <td style={{ paddingLeft: 32 }}>
+                            <PriorityBadge priority={cascadedInc.priority} />
+                          </td>
+                          <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                            ↳ {cascadedInc.component_id}
+                          </td>
+                          <td>
+                            <code style={{ fontSize: 12, background: 'transparent',
+                                           padding: '2px 6px', color: 'var(--text-muted)' }}>
+                              {cascadedInc.component_type}
+                            </code>
+                          </td>
+                          <td><StatusBadge status={cascadedInc.status} /></td>
+                          <td style={{ fontSize: 14 }}>{cascadedInc.signal_count}</td>
+                          <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                            {timeAgo(cascadedInc.created_at)}
+                          </td>
+                          <td style={{ textAlign: 'right', fontSize: 11 }}>
+                            <span style={{ color: 'var(--text-muted)', marginRight: 8 }}>
+                              🔴 cascaded
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </Fragment>
+                )
+              })}
+
+              {/* Show independent cascaded incidents (shown in list but also under root) */}
+              {data.incidents.filter(inc => inc.correlation?.is_cascaded_from).map(cascadedInc => (
                 <tr
-                  key={incident.id}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => navigate(`/incidents/${incident.id}`)}
+                  key={`independent-${cascadedInc.id}`}
+                  style={{ cursor: 'pointer', opacity: 0.7 }}
+                  onClick={() => navigate(`/incidents/${cascadedInc.id}`)}
                 >
-                  <td><PriorityBadge priority={incident.priority} /></td>
+                  <td style={{ width: 24 }}></td>
+                  <td><PriorityBadge priority={cascadedInc.priority} /></td>
                   <td style={{ fontWeight: 500, fontSize: 14 }}>
-                    {incident.component_id}
+                    {cascadedInc.component_id}
                   </td>
                   <td>
                     <code style={{ fontSize: 12, background: 'var(--bg)',
                                    padding: '2px 6px', borderRadius: 4 }}>
-                      {incident.component_type}
+                      {cascadedInc.component_type}
                     </code>
                   </td>
-                  <td><StatusBadge status={incident.status} /></td>
-                  <td style={{ fontSize: 14 }}>{incident.signal_count}</td>
+                  <td><StatusBadge status={cascadedInc.status} /></td>
+                  <td style={{ fontSize: 14 }}>{cascadedInc.signal_count}</td>
                   <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                    {timeAgo(incident.created_at)}
+                    {timeAgo(cascadedInc.created_at)}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <span style={{ fontSize: 13, color: 'var(--accent)' }}>
-                      View →
+                    <span style={{ fontSize: 11, background: 'var(--p0-bg)',
+                                   color: 'var(--p0-text)', padding: '2px 6px',
+                                   borderRadius: 3, marginRight: 8 }}>
+                      🔴 cascaded from {cascadedInc.correlation.is_cascaded_from.slice(0, 8)}
                     </span>
                   </td>
                 </tr>

@@ -4,7 +4,6 @@ import { fetchIncident, updateStatus } from '../api/client'
 import { PriorityBadge, StatusBadge } from '../components/Badge'
 import SignalList from '../components/SignalList'
 import TimelineVisualization from '../components/TimelineVisualization'
-import IncidentRelationships from '../components/IncidentRelationships'
 
 const TRANSITIONS = {
   OPEN:          ['INVESTIGATING'],
@@ -227,13 +226,10 @@ export default function IncidentDetail() {
         </div>
       </div>
 
-      {/* Incident Relationships */}
-      <IncidentRelationships incidentId={id} />
-
-      {/* Timeline visualization */}
+      {/* Timeline visualization
       {timeline && (
         <TimelineVisualization timelineData={timeline} />
-      )}
+      )} */}
 
       {/* Signal list */}
       <div className="card">

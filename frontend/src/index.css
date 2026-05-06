@@ -113,6 +113,20 @@ table {
   font-size: 14px;
 }
 
+.incident-table {
+  min-width: 860px;
+  table-layout: fixed;
+}
+
+.incident-table__expand { width: 44px; }
+.incident-table__priority { width: 100px; }
+.incident-table__component { width: 26%; }
+.incident-table__type { width: 150px; }
+.incident-table__status { width: 120px; }
+.incident-table__signals { width: 90px; }
+.incident-table__created { width: 110px; }
+.incident-table__actions { width: 180px; }
+
 th {
   text-align: left;
   padding: 10px 12px;

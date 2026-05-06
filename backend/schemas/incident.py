@@ -76,9 +76,19 @@ class RCASummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CorrelationInfo(BaseModel):
+    """Embedded in WorkItemDetailResponse when incident is cascaded from root."""
+    is_cascaded_from: str  # root incident ID
+    root_component: str  # component type of root
+    reason: str  # correlation reason
+
+
 class WorkItemDetailResponse(WorkItemResponse):
     """
     Extended response for GET /incidents/{id}.
     Includes the RCA record if the incident is RESOLVED or CLOSED.
+    Includes correlation metadata if this is a cascaded incident.
     """
     rca: Optional[RCASummary] = None
+    correlation: Optional[CorrelationInfo] = None
+    cascaded_incidents: list[str] = []  # list of incident IDs cascaded from this one

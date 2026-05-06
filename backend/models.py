@@ -29,12 +29,6 @@ class RootCauseCategory(str, enum.Enum):
     DEPENDENCY_FAILURE = "DEPENDENCY_FAILURE"
     UNKNOWN            = "UNKNOWN"
 
-class RelationshipType(str, enum.Enum):
-    """How two incidents are related."""
-    ROOT_CAUSE      = "ROOT_CAUSE"      # source caused target
-    CASCADED_FROM   = "CASCADED_FROM"   # target cascaded from source
-    RELATED_TO      = "RELATED_TO"      # temporal/semantic correlation
-
 class WorkItem(Base):
     __tablename__ = "work_items"
 
@@ -63,22 +57,11 @@ class RCA(Base):
     submitted_at        = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class IncidentRelationship(Base):
-    """
-    Links between incidents showing root cause and cascade relationships.
-    
-    Example:
-      - RDBMS incident (source) -> API incident (target)
-      - Relationship: ROOT_CAUSE (RDBMS caused API)
-      - Confidence: 0.95 (based on dependency graph + timing)
-    """
-    __tablename__ = "incident_relationships"
+class IncidentCorrelation(Base):
+    __tablename__ = "incident_correlations"
 
-    id                      = Column(String(26), primary_key=True)
-    source_incident_id      = Column(String(26), ForeignKey("work_items.id"), nullable=False, index=True)
-    target_incident_id      = Column(String(26), ForeignKey("work_items.id"), nullable=False, index=True)
-    relationship_type       = Column(Enum(RelationshipType), nullable=False)
-    confidence              = Column(Float, nullable=False)  # 0.0 to 1.0
-    detection_method        = Column(String(50), nullable=False)  # dependency_graph, temporal, semantic
-    reason                  = Column(Text, nullable=False)  # Human-readable explanation
-    created_at              = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    id                   = Column(String(26), primary_key=True)
+    root_incident_id     = Column(String(26), ForeignKey("work_items.id"), nullable=False, index=True)
+    cascaded_incident_id = Column(String(26), ForeignKey("work_items.id"), nullable=False, index=True)
+    correlation_reason   = Column(String(200), nullable=False)
+    created_at           = Column(DateTime(timezone=True), server_default=func.now())

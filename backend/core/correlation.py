@@ -1,241 +1,113 @@
-"""
-Incident Correlation Engine
-=============================
-Detects relationships between incidents using multiple detection methods:
-  - Dependency Graph: Component dependencies (hardcoded)
-  - Temporal: Incidents within 30 seconds of each other
-  - Semantic: Similar error codes/patterns
-"""
-import structlog
-from typing import Optional, List, Tuple
-from datetime import datetime, timedelta, timezone
-from db.mysql import AsyncSessionLocal
-from models import WorkItem, IncidentRelationship, RelationshipType, ComponentType
-from sqlalchemy import select
+# backend/core/correlation.py
+
 import ulid
+import structlog
+from datetime import datetime, timezone
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from db.mysql import AsyncSessionLocal
+from db.redis import get_redis
+from models import WorkItem, ComponentType, WorkItemStatus, IncidentCorrelation
+
 
 log = structlog.get_logger()
 
-# ── Dependency Graph ─────────────────────────────────────
-# Component dependencies: if A fails, B typically fails next
-# Format: ComponentType -> [dependent ComponentTypes]
-COMPONENT_DEPENDENCIES = {
-    ComponentType.RDBMS: [
-        ComponentType.API,
-        ComponentType.CACHE,
-        ComponentType.ASYNC_QUEUE,
-    ],
-    ComponentType.CACHE: [
-        ComponentType.API,
-        ComponentType.ASYNC_QUEUE,
-    ],
-    ComponentType.ASYNC_QUEUE: [
-        ComponentType.CACHE,
-    ],
-    ComponentType.MCP_HOST: [
-        ComponentType.API,
-    ],
+
+# Static dependency map: if A is in the list, then A depends on the key
+DEPENDENCY_MAP: dict[str, list[str]] = {
+    "RDBMS":       ["API", "CACHE", "ASYNC_QUEUE", "NOSQL", "MCP_HOST"],
+    "MCP_HOST":    ["API"],
+    "API":         [],
+    "CACHE":       [],
+    "ASYNC_QUEUE": [],
+    "NOSQL":       [],
 }
 
 
-async def detect_dependency_relationships(
-    new_work_item: WorkItem,
-    existing_work_items: List[WorkItem],
-    time_window_seconds: int = 30,
-) -> List[Tuple[WorkItem, float, str]]:
+def _get_upstream_dependencies(component_type: str) -> list[str]:
     """
-    Detect incidents caused by component dependencies.
+    Return all components that the given component type depends on.
     
-    Returns list of (related_work_item, confidence, reason) tuples.
+    Example: _get_upstream_dependencies("CACHE") -> ["RDBMS"]
+    because CACHE is in DEPENDENCY_MAP["RDBMS"]'s value.
     """
-    related = []
+    upstream = []
+    for dependency_root, dependents in DEPENDENCY_MAP.items():
+        if component_type in dependents:
+            upstream.append(dependency_root)
+    return upstream
+
+
+async def detect_and_store_correlations(
+    incident_id: str,
+    component_type: str,
+    component_id: str,
+) -> int:
+    """
+    Detect correlation for a newly created incident.
     
-    # Get dependencies that would cause this component to fail
-    causing_components = set()
-    for component_type, dependents in COMPONENT_DEPENDENCIES.items():
-        if new_work_item.component_type in dependents:
-            causing_components.add(component_type)
+    When a new incident is created on component_type, check if there are
+    any open incidents on the upstream dependencies. If found, store
+    the relationship in incident_correlations table.
     
-    now = datetime.now(timezone.utc)
-    cutoff_time = now - timedelta(seconds=time_window_seconds)
+    Returns: count of correlations created.
+    """
+    redis = get_redis()
+    upstream_dependencies = _get_upstream_dependencies(component_type)
     
-    for existing in existing_work_items:
-        if existing.id == new_work_item.id:
-            continue
-        
-        # Check if this component could have caused the new one
-        if existing.component_type in causing_components:
-            # Higher confidence if closer in time
-            time_diff = (new_work_item.created_at - existing.created_at).total_seconds()
-            if 0 < time_diff < time_window_seconds:
-                # Confidence decreases with time: 1.0 at 0s, 0.6 at 30s
-                confidence = max(0.6, 1.0 - (time_diff / (time_window_seconds * 2)))
-                
-                reason = (
-                    f"{existing.component_type.value} failure ({time_diff:.1f}s earlier) "
-                    f"typically cascades to {new_work_item.component_type.value}"
+    if not upstream_dependencies:
+        log.debug(
+            "no_upstream_dependencies",
+            incident_id=incident_id,
+            component_type=component_type,
+        )
+        return 0
+    
+    correlations_created = 0
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            # Query for any open incidents on upstream dependency components
+            for upstream_component in upstream_dependencies:
+                result = await session.execute(
+                    select(WorkItem).where(
+                        (WorkItem.component_type == ComponentType(upstream_component))
+                        & (WorkItem.status.in_([
+                            WorkItemStatus.OPEN,
+                            WorkItemStatus.INVESTIGATING,
+                            WorkItemStatus.RESOLVED,
+                        ]))
+                    )
                 )
-                related.append((existing, confidence, reason))
-    
-    return related
-
-
-async def detect_temporal_relationships(
-    new_work_item: WorkItem,
-    existing_work_items: List[WorkItem],
-    time_window_seconds: int = 30,
-) -> List[Tuple[WorkItem, float, str]]:
-    """
-    Detect incidents occurring in close temporal proximity.
-    
-    Returns list of (related_work_item, confidence, reason) tuples.
-    """
-    related = []
-    
-    now = datetime.now(timezone.utc)
-    cutoff_time = now - timedelta(seconds=time_window_seconds)
-    
-    for existing in existing_work_items:
-        if existing.id == new_work_item.id:
-            continue
-        
-        # Check if incidents are close in time
-        time_diff = abs((new_work_item.created_at - existing.created_at).total_seconds())
-        if 0 < time_diff < time_window_seconds:
-            # Higher confidence for closer timing
-            confidence = max(0.5, 1.0 - (time_diff / time_window_seconds))
+                upstream_incidents = result.scalars().all()
+                
+                for upstream_incident in upstream_incidents:
+                    # Create a correlation record linking root → cascaded
+                    correlation = IncidentCorrelation(
+                        id=str(ulid.new()),
+                        root_incident_id=upstream_incident.id,
+                        cascaded_incident_id=incident_id,
+                        correlation_reason=f"{upstream_component} failure detected before this {component_type} incident",
+                    )
+                    session.add(correlation)
+                    correlations_created += 1
+                    
+                    log.info(
+                        "correlation_detected",
+                        root_incident_id=upstream_incident.id,
+                        cascaded_incident_id=incident_id,
+                        root_component=upstream_component,
+                        cascaded_component=component_type,
+                    )
             
-            reason = (
-                f"Temporal correlation: {existing.component_type.value} incident "
-                f"{time_diff:.1f}s before {new_work_item.component_type.value} incident"
-            )
-            related.append((existing, confidence, reason))
+            await session.commit()
     
-    return related
-
-
-async def detect_semantic_relationships(
-    new_work_item: WorkItem,
-    existing_work_items: List[WorkItem],
-) -> List[Tuple[WorkItem, float, str]]:
-    """
-    Detect incidents with similar error patterns.
-    
-    This is a placeholder for pattern-matching logic that could be enhanced.
-    Returns list of (related_work_item, confidence, reason) tuples.
-    """
-    related = []
-    
-    # For now, same component type in recent history = semantic relation
-    cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-    
-    for existing in existing_work_items:
-        if existing.id == new_work_item.id:
-            continue
-        
-        if (existing.component_type == new_work_item.component_type and
-            existing.created_at > cutoff_time):
-            
-            reason = (
-                f"Semantic pattern: Repeated {existing.component_type.value} failures "
-                f"suggest systemic issue (check config or resource limits)"
-            )
-            confidence = 0.7  # Moderate confidence for pattern match
-            related.append((existing, confidence, reason))
-    
-    return related
-
-
-async def find_related_incidents(
-    work_item_id: str,
-    time_window_seconds: int = 30,
-) -> Tuple[List[IncidentRelationship], List[IncidentRelationship]]:
-    """
-    Find all incidents that could be related to the given work item.
-    
-    Returns (root_cause_incidents, cascaded_incidents).
-    """
-    async with AsyncSessionLocal() as session:
-        # Get the target work item
-        result = await session.execute(
-            select(WorkItem).where(WorkItem.id == work_item_id)
+    except SQLAlchemyError as e:
+        log.error(
+            "correlation_detection_error",
+            incident_id=incident_id,
+            error=str(e),
         )
-        target = result.scalar_one_or_none()
-        if not target:
-            return [], []
-        
-        # Get all recent incidents (could be related)
-        cutoff = target.created_at - timedelta(seconds=time_window_seconds * 2)
-        result = await session.execute(
-            select(WorkItem)
-            .where(WorkItem.created_at >= cutoff)
-            .order_by(WorkItem.created_at.desc())
-        )
-        all_incidents = result.scalars().all()
-        
-        # Run all detection methods
-        dep_related = await detect_dependency_relationships(
-            target, all_incidents, time_window_seconds
-        )
-        temp_related = await detect_temporal_relationships(
-            target, all_incidents, time_window_seconds
-        )
-        sem_related = await detect_semantic_relationships(target, all_incidents)
-        
-        # Deduplicate and merge results
-        seen = set()
-        relationships = []
-        
-        for related_item, confidence, reason in dep_related + temp_related + sem_related:
-            if related_item.id not in seen:
-                seen.add(related_item.id)
-                
-                # Determine if this is a root cause or cascade
-                # If related incident happened before, it's a root cause
-                is_root_cause = related_item.created_at < target.created_at
-                
-                rel_type = (
-                    RelationshipType.ROOT_CAUSE if is_root_cause
-                    else RelationshipType.CASCADED_FROM
-                )
-                
-                # Determine detection method (use the first one found)
-                if any(r[0].id == related_item.id for r in dep_related):
-                    method = "dependency_graph"
-                elif any(r[0].id == related_item.id for r in temp_related):
-                    method = "temporal"
-                else:
-                    method = "semantic"
-                
-                rel = IncidentRelationship(
-                    id=str(ulid.new()),
-                    source_incident_id=related_item.id if is_root_cause else target.id,
-                    target_incident_id=target.id if is_root_cause else related_item.id,
-                    relationship_type=rel_type,
-                    confidence=confidence,
-                    detection_method=method,
-                    reason=reason,
-                )
-                relationships.append(rel)
-        
-        # Separate into root causes and cascades
-        root_causes = [r for r in relationships if r.relationship_type == RelationshipType.ROOT_CAUSE]
-        cascades = [r for r in relationships if r.relationship_type == RelationshipType.CASCADED_FROM]
-        
-        return root_causes, cascades
-
-
-async def save_relationships(relationships: List[IncidentRelationship]) -> None:
-    """Save detected relationships to database."""
-    if not relationships:
-        return
+        return 0
     
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            for rel in relationships:
-                session.add(rel)
-        
-        log.info(
-            "relationships_saved",
-            count=len(relationships),
-        )
+    return correlations_created

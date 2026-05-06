@@ -1,7 +1,7 @@
 """Fix first_signal_id length for UUID signal ids
 
 Revision ID: 20260506_fix_signal_id_len
-Revises: c17aaf851afe
+Revises: 001
 Create Date: 2026-05-06
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "20260506_fix_signal_id_len"
-down_revision: Union[str, None] = "c17aaf851afe"
+down_revision: Union[str, None] = "001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
