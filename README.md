@@ -15,10 +15,8 @@ A high-throughput, highly resilient Incident Management System designed to inges
 
 ## 🏗️ Architecture:
 
-![alt text](<Screenshot from 2026-05-06 15-07-24.png>)
-
-![alt text](<Screenshot from 2026-05-06 14-13-20.png>)
-
+![alt text](<Screenshot from 2026-05-06 15-07-24-2.png>)
+![alt text](<Screenshot from 2026-05-06 14-13-20-1.png>)
 
 
 ### Tech Stack
