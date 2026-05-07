@@ -19,10 +19,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "work_items",
-        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True)
+    # Check if column exists before adding to avoid duplicate column error
+    conn = op.get_bind()
+    result = conn.execute(
+        sa.text("SHOW COLUMNS FROM work_items LIKE 'resolved_at'")
     )
+    if result.rowcount == 0:
+        op.add_column(
+            "work_items",
+            sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True)
+        )
 
 
 def downgrade() -> None:

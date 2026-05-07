@@ -1,155 +1,318 @@
-```markdown
-# Incident Management System (IMS) - SRE Edition
+# Incident Management System (IMS) – SRE Edition
 
-A high-throughput, highly resilient Incident Management System designed to ingest, debounce, and correlate operational alerts at scale. This project is built with Site Reliability Engineering (SRE) principles to handle cascading failures and high-volume traffic without crashing.
+A high-throughput, highly resilient **Incident Management System (IMS)** engineered using modern **Site Reliability Engineering (SRE)** principles.
 
-## 🚀 Core Features
-
-*   **High-Throughput Ingestion:** Capable of absorbing bursts of 10,000+ signals per second using asynchronous worker pools and a bounded in-memory queue.
-*   **Distributed Debouncing:** Intelligently groups hundreds of duplicate alerts within a 10-second window into a single, actionable "Work Item" using Redis atomic operations (`SET NX EX`).
-*   **Cascading Failure Correlation:** Automatically detects upstream dependencies (e.g., RDBMS failures causing API failures) and groups them visually for rapid Root Cause Analysis.
-*   **Strict State Machine:** Enforces SRE postmortem culture by programmatically blocking the closure of incidents until a detailed Root Cause Analysis (RCA) is submitted.
-*   **Hot-Path Caching:** Serves the Live Incident Dashboard directly from Redis sorted sets to protect the relational database from read-heavy refresh storms during an outage.
+The platform is designed to ingest, debounce, correlate, and process operational alerts at scale while remaining stable during cascading infrastructure failures and traffic spikes.
 
 ---
 
-## 🏗️ Architecture:
-<img width="1920" height="1080" alt="archdiag2" src="https://github.com/user-attachments/assets/7f2f6827-0315-45b3-b5d6-8ed26e88db3c" />
+# 🚀 Core Features
 
-<img width="1920" height="1080" alt="archdiag2" src="https://github.com/user-attachments/assets/21c2ea41-1cba-49c2-b7d4-3a2d55ec9849" />
+## High-Throughput Alert Ingestion
+Handles bursts of **10,000+ signals per second** using asynchronous worker pools and bounded in-memory queues.
 
+## Distributed Debouncing
+Groups duplicate alerts arriving within a configurable time window into a single actionable incident using Redis atomic operations:
 
-### Tech Stack
+```redis
+SET NX EX
+```
 
-*   **API Framework:** Python / FastAPI
-*   **Frontend Framework:** React (Vite)
-*   **Concurrency:** `asyncio` Task Groups & Worker Pools
-*   **State Management (Source of Truth):** MySQL (with SQLAlchemy & Alembic for migrations)
-*   **Debouncer & Hot Cache:** Redis
-*   **Data Lake (Audit Log):** MongoDB
-*   **Time-Series Metrics:** InfluxDB
-*   **Load Testing:** `httpx.AsyncClient` & `pytest`
+## Cascading Failure Correlation
+Automatically detects upstream dependency failures and visually correlates related incidents for faster Root Cause Analysis (RCA).
 
----
+### Example
+- Database outage → API failures → Service degradation
 
-## 🛡️ Engineering Highlight: Backpressure & Resilience
+## Strict Incident State Machine
+Prevents incidents from being closed until a detailed RCA is submitted, enforcing operational discipline and postmortem workflows.
 
-An incident management system is often hit hardest exactly when the rest of the infrastructure is failing. To ensure this IMS remains highly available during a storm of cascading failures, it employs a **Two-Tiered Backpressure and Load Shedding Strategy**:
-
-### 1. Tier 1: Noisy Neighbor Protection (Rate Limiting)
-
-This is the first line of defense, implemented using the `slowapi` middleware. If a single degraded microservice or a misconfigured client enters an infinite retry loop and spams the ingestion endpoint, it is isolated based on its IP address.
-
-*   **Mechanism:** The API returns an **HTTP 429 Too Many Requests** with a `Retry-After` header.
-*   **Benefit:** This shapes traffic cooperatively, protecting the system from a single misbehaving client without affecting healthy services.
-
-### 2. Tier 2: System Overload Protection (Load Shedding)
-
-The core ingestion API is designed for speed and never blocks waiting for a database write. It returns a fast **HTTP 202 Accepted** and pushes the signal payload to an in-memory `asyncio.Queue`.
-
-*   **Mechanism:** To prevent Out-Of-Memory (OOM) crashes if the background workers or databases slow down, this queue is strictly bounded to a `maxsize` of 50,000. If the queue hits this capacity, the API instantly sheds new load by returning an **HTTP 503 Service Unavailable**.
-*   **Benefit:** This pushes backpressure upstream to the clients, keeping the IMS container alive to process its existing backlog rather than crashing entirely. This ensures the system remains available to process the data it has already accepted.
+## Hot-Path Dashboard Caching
+Serves live incident dashboards directly from Redis sorted sets to reduce database load during outage storms and high refresh traffic.
 
 ---
 
-## 🛠️ Setup Instructions (Docker Compose)
+# 🏗️ System Architecture
 
-The easiest way to run the entire IMS stack locally is using Docker Compose, which spins up the API, background workers, and all required datastores.
+![alt text](<Screenshot from 2026-05-06 15-07-24-1.png>)
 
-### Prerequisites
+<br>
 
-*   Docker & Docker Compose
-*   Node.js and npm (for the frontend)
-*   Python 3.10+ (for local development/testing)
+![alt text](<Screenshot from 2026-05-06 14-13-20-1 copy.png>)
 
-### 1. Start the Backend Infrastructure
+---
 
-Clone the repository and start all backend containers in detached mode.
+# 🧰 Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Backend API | Python + FastAPI |
+| Frontend | React + Vite |
+| Concurrency | `asyncio` Task Groups & Worker Pools |
+| Relational Database | MySQL |
+| ORM & Migrations | SQLAlchemy + Alembic |
+| Cache & Debouncer | Redis |
+| Audit Log Storage | MongoDB |
+| Time-Series Metrics | InfluxDB |
+| Load Testing | `pytest` + `httpx.AsyncClient` |
+
+---
+
+# 🛡️ Engineering Highlight – Backpressure & Resilience
+
+An Incident Management System is usually under maximum stress exactly when the infrastructure is failing.
+
+To remain available during outage storms, this IMS implements a **Two-Tiered Backpressure & Load Shedding Strategy**.
+
+---
+
+## Tier 1 — Noisy Neighbor Protection (Rate Limiting)
+
+Implemented using the `slowapi` middleware.
+
+If a degraded microservice or misconfigured client enters a retry loop and floods the ingestion endpoint, requests are isolated by IP.
+
+### Mechanism
+
+The API responds with:
+
+```http
+HTTP 429 Too Many Requests
+```
+
+along with a `Retry-After` header.
+
+### Benefit
+
+Protects healthy traffic from being impacted by a single noisy client.
+
+---
+
+## Tier 2 — System Overload Protection (Load Shedding)
+
+The ingestion API is optimized for speed and never blocks while waiting for database writes.
+
+Incoming signals are pushed into an in-memory bounded queue:
+
+```python
+asyncio.Queue(maxsize=50000)
+```
+
+### Mechanism
+
+If the queue reaches capacity, the API immediately rejects additional requests with:
+
+```http
+HTTP 503 Service Unavailable
+```
+
+### Benefit
+
+Prevents:
+- Out-Of-Memory (OOM) crashes
+- Worker exhaustion
+- Complete service collapse
+
+This ensures the IMS remains alive long enough to process already accepted workloads.
+
+---
+
+# 🛠️ Setup Instructions (Docker Compose)
+
+The easiest way to run the complete IMS stack locally is using Docker Compose.
+
+---
+
+## Prerequisites
+
+Install the following:
+
+- Docker
+- Docker Compose
+- Python 3.10+
+- Node.js & npm
+
+---
+
+# 1️⃣ Clone the Repository
 
 ```bash
-git clone <https://github.com/MdAkbar123/Incident-Management-System-IMS--SRE.git>
-cd <repository-folder>
+git clone https://github.com/MdAkbar123/Incident-Management-System-IMS--SRE.git
 
+cd Incident-Management-System-IMS--SRE
+```
+
+---
+
+# 2️⃣ Start Backend Infrastructure
+
+```bash
 docker-compose up -d
 ```
 
-This command will start the following services:
-*   **MySQL:** Port `3306`
-*   **Redis:** Port `6379`
-*   **MongoDB:** Port `27017`
-*   **InfluxDB:** Port `8086`
+This starts:
 
-The FastAPI application and its workers will be running and accessible on port `8000`.
+| Service | Port |
+|---|---|
+| MySQL | `3306` |
+| Redis | `6379` |
+| MongoDB | `27017` |
+| InfluxDB | `8086` |
+| FastAPI API | `8000` |
 
-### 2. Run Database Migrations
+---
 
-Initialize the MySQL schema using Alembic. You can execute this command inside the running `api` container.
+# 3️⃣ Run Database Migrations
 
 ```bash
-docker-compose exec api alembic upgrade head
+cd backend && alemibc upgrade head
 ```
 
-### 3. Start the Frontend
+---
 
-Navigate to the frontend directory, install dependencies, and start the development server.
+# 4️⃣ Start the Frontend
 
 ```bash
-cd frontend
+cd ../frontend
+
 npm install
+
 npm run dev
 ```
 
-The frontend will be available at [http://localhost:5173](http://localhost:5173) (or another port if 5173 is in use).
+Frontend URL:
 
-### 4. Verify Health
+```txt
+http://localhost:5173
+```
 
-You can ensure the server and all datastore connections are healthy by hitting the health check endpoint:
+---
+
+# 5️⃣ Verify Health Status
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-You should see a JSON response with the status of each database connection.
+Expected:
+- API health
+- Database connectivity
+- Redis status
+- MongoDB status
+- InfluxDB status
 
 ---
 
-## 🧪 Simulation & Load Testing
+# 🧪 Simulation & Load Testing
 
-To evaluate the system's resilience, the repository includes simulation scripts.
+The repository includes scripts for resilience validation and stress testing.
 
-*   **Outage Simulator:** This script proves the debouncing and correlation logic by firing concurrent signals.
-    ```bash
-    python scripts/simulate_outage.py
-    ```
+---
 
-*   **Aggressive Load Test:** This script stress-tests the ingestion endpoint with 10,000 signals.
-    ```bash
-    python scripts/load_test.py
-    ```
+## Outage Simulation with correlation features.
 
-## 📡 Core API Endpoints
+Simulates cascading failures and validates debouncing/correlation logic.
 
-| Method | Endpoint                  | Description                                                     |
-|--------|---------------------------|-----------------------------------------------------------------|
-| `POST` | `/api/v1/ingest`          | Ingest raw alert signals (Returns `202`, `429`, or `503`).       |
-| `GET`  | `/incidents`              | List active incidents sorted by severity (Served from Redis).   |
-| `GET`  | `/incidents/{id}`         | Get incident details and cascaded correlation data.             |
-| `GET`  | `/incidents/{id}/timeline`| Get the real-time processing timeline for an incident.          |
-| `PUT`  | `/incidents/{id}/status`  | Transition incident state (e.g., `OPEN` -> `INVESTIGATING`).    |
-| `POST` | `/incidents/{id}/rca`     | Submit a Root Cause Analysis to unlock the `CLOSED` state.      |
+```bash
+python scripts/simulate_outage.py
+```
 
+---
 
-Project Images:
+## Aggressive Load Test
 
-![alt text](livepage.png)
+Stress-tests ingestion throughput with 10,000+ signals.
 
-![alt text](<Closed incident-1.png>)
+```bash
+python scripts/load_test.py
+```
 
-![alt text](resolvemarked.png)
+---
 
-![alt text](Rcapage.png)
+# 📡 Core API Endpoints
 
-![alt text](report.png)
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/ingest` | Ingest raw alert signals |
+| `GET` | `/incidents` | List active incidents |
+| `GET` | `/incidents/{id}` | Get incident details |
+| `GET` | `/incidents/{id}/timeline` | View incident timeline |
+| `PUT` | `/incidents/{id}/status` | Transition incident states |
+| `POST` | `/incidents/{id}/rca` | Submit Root Cause Analysis |
 
-The full OpenAPI documentation is available at [http://localhost:8000/docs](http://localhost:8000/docs) when the application is running.
+---
 
+# 📊 Project Screenshots
+
+## Live Dashboard
+
+![Live Dashboard](livepage.png)
+
+---
+
+## Closed Incident View
+
+![Closed Incident](Closed%20incident-1.png)
+
+---
+
+## Incident Resolution Tracking
+
+![Resolution Tracking](resolvemarked.png)
+
+---
+
+## RCA Submission Page
+
+![RCA Page](Rcapage.png)
+
+---
+
+## Incident Reports
+
+![Reports](report.png)
+
+---
+
+# 📘 API Documentation
+
+Interactive OpenAPI documentation is available when the application is running:
+
+```txt
+http://localhost:8000/docs
+```
+
+---
+
+# 🎯 Project Goals
+
+This project demonstrates production-grade engineering patterns commonly used in large-scale distributed systems:
+
+- Backpressure handling
+- Distributed coordination
+- Event debouncing
+- Failure correlation
+- Operational resilience
+- Queue-based async processing
+- Hot-path caching
+- Incident lifecycle enforcement
+
+---
+
+# 📌 Future Improvements
+
+Potential roadmap enhancements:
+
+- Kubernetes deployment manifests
+- Prometheus + Grafana observability stack
+- Kafka-based event streaming
+- WebSocket real-time dashboards
+- Multi-region failover
+- PagerDuty / Slack integrations
+- ML-powered anomaly detection
+
+---
+
+# 📄 License
+
+This project is intended for educational, architectural, and portfolio demonstration purposes.
