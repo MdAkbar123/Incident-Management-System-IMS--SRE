@@ -30,6 +30,9 @@ Prevents incidents from being closed until a detailed RCA is submitted, enforcin
 ## Hot-Path Dashboard Caching
 Serves live incident dashboards directly from Redis sorted sets to reduce database load during outage storms and high refresh traffic.
 
+## Cascading Failure Correlation 
+Uses a system dependency graph to automatically detect and group downstream symptoms under their upstream root cause, instantly cutting through alert storms.
+
 ---
 
 # 🏗️ System Architecture
@@ -172,9 +175,10 @@ cd backend && alembic upgrade head
 
 # 4️⃣ Start the Backend
 
-'''bash
+```bash
 uvicorn main:app --reload --port 8000
-'''
+```
+---
 
 # 5️⃣ Start the Frontend
 
