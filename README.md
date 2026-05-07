@@ -170,7 +170,13 @@ cd backend && alembic upgrade head
 
 ---
 
-# 4️⃣ Start the Frontend
+# 4️⃣ Start the Backend
+
+'''bash
+uvicorn main:app --reload --port 8000
+'''
+
+# 5️⃣ Start the Frontend
 
 ```bash
 cd ../frontend
@@ -183,12 +189,12 @@ npm run dev
 Frontend URL:
 
 ```txt
-http://localhost:5173
+http://localhost:3000
 ```
 
 ---
 
-# 5️⃣ Verify Health Status
+# 6 Verify Health Status
 
 ```bash
 curl http://localhost:8000/health
