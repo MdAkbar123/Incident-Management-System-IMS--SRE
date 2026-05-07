@@ -20,6 +20,7 @@ from core.timeline import get_or_create_timeline, persist_timeline_to_redis
 from core.correlation import detect_and_store_correlations
 from models import WorkItem, ComponentType, Priority, WorkItemStatus
 import ulid
+from core.correlation import detect_and_store_correlations, detect_downstream_correlations
 
 log = structlog.get_logger()
 
@@ -160,6 +161,16 @@ async def _process_signal(signal: SignalIngest):
                 "correlation_detection_completed",
                 correlations_found=correlation_count,
             )
+            upstream_count = await detect_and_store_correlations(
+                incident_id=work_item_id,
+                component_type=work_item.component_type.value,
+                component_id=work_item.component_id,
+            )
+            downstream_count = await detect_downstream_correlations(
+                incident_id=work_item_id,
+                component_type=work_item.component_type.value,
+            )
+            correlation_count = upstream_count + downstream_count
 
         except Exception as e:
             # Log exception but avoid structlog parameter binding conflict

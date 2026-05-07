@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 """
-IMS Full-Stack Outage Simulation
-=================================
-Simulates a realistic cascading failure across all six component types.
+IMS Full-Stack Outage Simulation + Correlation Backfill
+========================================================
+Simulates a realistic cascading failure across all six component types,
+then retroactively backfills correlation records for all open incidents.
 
 Cascade Scenario (realistic failure propagation):
   1. RDBMS_PRIMARY_01   → database goes down           (P0, 200 signals)
@@ -19,22 +21,37 @@ Key Insights:
   • Priority routing: P0 incidents first, then P1, then P2
   • Debounce window: 10 seconds per component_id
   • Evaluator sees: 6 different work items sorted by priority
+  • After simulation, correlation backfill runs automatically
 
 Run from project root:
-    python scripts/simulate_outage.py
+    python scripts/simulate_outage_with_backfill.py
 
 Make sure uvicorn is running on localhost:8000 first:
     uvicorn backend.main:app --reload --port 8000
 """
+
 import asyncio
-import httpx
+import sys
+sys.path.insert(0, '/home/akbar-ali/DEVOPS/projects/ims/backend')
+
 import time
+import ulid
+import httpx
+import structlog
 from datetime import datetime, timezone
+from sqlalchemy import select
 
-BASE_URL    = "http://localhost:8000"
-DASHBOARD   = "http://localhost:3000"
+from db.mysql import AsyncSessionLocal
+from models import WorkItem, ComponentType, WorkItemStatus, IncidentCorrelation
+from core.correlation import _get_upstream_dependencies
 
-# ── Signal templates — all six component types ───────────────
+log = structlog.get_logger()
+
+BASE_URL  = "http://localhost:8000"
+DASHBOARD = "http://localhost:3000"
+
+
+# ── Signal templates — all six component types ───────────────────────────────
 
 SIGNALS = {
     "RDBMS": {
@@ -49,7 +66,7 @@ SIGNALS = {
             "active_connections": 100,
             "waiting_requests":   847,
             "max_pool_size":      100,
-        }
+        },
     },
     "MCP_HOST": {
         "component_id":   "MCP_HOST_02",
@@ -63,7 +80,7 @@ SIGNALS = {
             "lost_connection_to": "RDBMS_PRIMARY_01",
             "failsafe_mode":      True,
             "retry_count":        5,
-        }
+        },
     },
     "API": {
         "component_id":   "API_GATEWAY_01",
@@ -74,10 +91,10 @@ SIGNALS = {
         "message":        "5xx error rate at 43%. Upstream DB timeouts propagating to clients.",
         "source_host":    "api-gateway.internal",
         "payload": {
-            "error_rate_pct":   43.2,
-            "p99_latency_ms":   4900,
-            "upstream_errors":  "RDBMS_PRIMARY_01",
-        }
+            "error_rate_pct":  43.2,
+            "p99_latency_ms":  4900,
+            "upstream_errors": "RDBMS_PRIMARY_01",
+        },
     },
     "CACHE": {
         "component_id":   "CACHE_CLUSTER_01",
@@ -88,10 +105,10 @@ SIGNALS = {
         "message":        "Eviction storm triggered. DB fallback overloading remaining connections.",
         "source_host":    "cache-node-3.internal",
         "payload": {
-            "eviction_rate":      0.91,
-            "hit_rate":           0.08,
-            "db_fallback_calls":  12400,
-        }
+            "eviction_rate":     0.91,
+            "hit_rate":          0.08,
+            "db_fallback_calls": 12400,
+        },
     },
     "ASYNC_QUEUE": {
         "component_id":   "QUEUE_ORDERS_01",
@@ -106,7 +123,7 @@ SIGNALS = {
             "consumers_alive": 2,
             "consumers_total": 8,
             "dlq_size":        340,
-        }
+        },
     },
     "NOSQL": {
         "component_id":   "NOSQL_CATALOG_01",
@@ -117,60 +134,54 @@ SIGNALS = {
         "message":        "Write timeouts on shard 3. Replication lag from primary overload.",
         "source_host":    "nosql-shard-3.internal",
         "payload": {
-            "shard_id":          3,
+            "shard_id":           3,
             "replication_lag_ms": 8400,
             "write_timeout_pct":  67,
-        }
+        },
     },
 }
 
-# ── Cascade waves — order and signal counts reflect realistic propagation ────
+# ── Cascade waves ─────────────────────────────────────────────────────────────
 # Format: (component_type, signal_count, pause_before_secs, cascade_description)
 WAVES = [
-    ("RDBMS",      200, 0,  "Database goes down — root cause"),
-    ("MCP_HOST",    50, 5,  "MCP host loses DB connection"),
-    ("API",         80, 5,  "API gateway starts returning 5xx"),
-    ("CACHE",       60, 3,  "Cache eviction storm as DB fallback overwhelms"),
-    ("ASYNC_QUEUE", 40, 3,  "Queue consumers blocked on DB writes"),
-    ("NOSQL",       30, 2,  "NoSQL write timeouts from replication lag"),
+    ("RDBMS",       200, 0, "Database goes down — root cause"),
+    ("MCP_HOST",     50, 5, "MCP host loses DB connection"),
+    ("API",          80, 5, "API gateway starts returning 5xx"),
+    ("CACHE",        60, 3, "Cache eviction storm as DB fallback overwhelms"),
+    ("ASYNC_QUEUE",  40, 3, "Queue consumers blocked on DB writes"),
+    ("NOSQL",        30, 2, "NoSQL write timeouts from replication lag"),
 ]
 
 
-# ── Helpers ──────────────────────────────────────────────────
+# ── Console helpers ───────────────────────────────────────────────────────────
 
 def banner(text: str, char: str = "="):
-    """Print a centered banner."""
     width = 70
     print(f"\n{char * width}")
     print(f"  {text}")
     print(f"{char * width}")
 
 def step(text: str):
-    """Print a step indicator."""
     print(f"\n  → {text}")
 
 def ok(text: str):
-    """Print a success indicator."""
     print(f"  ✓ {text}")
 
 def info(text: str):
-    """Print info text."""
     print(f"    {text}")
 
 def warn(text: str):
-    """Print a warning indicator."""
     print(f"  ! {text}")
 
+
+# ── Outage simulation helpers ─────────────────────────────────────────────────
 
 async def send_signals(
     client: httpx.AsyncClient,
     signal: dict,
     count: int,
 ) -> dict[int, int]:
-    """
-    Fire `count` signals concurrently to /ingest endpoint.
-    Returns a dict of {status_code: count}.
-    """
+    """Fire `count` signals concurrently to /ingest. Returns {status_code: count}."""
     tasks = [
         client.post("/ingest", json=signal, timeout=15.0)
         for _ in range(count)
@@ -183,7 +194,6 @@ async def send_signals(
             counts[0] = counts.get(0, 0) + 1
         else:
             counts[r.status_code] = counts.get(r.status_code, 0) + 1
-
     return counts
 
 
@@ -192,11 +202,8 @@ async def verify_work_item(
     component_id: str,
     max_attempts: int = 5,
 ) -> dict | None:
-    """
-    Poll /incidents up to max_attempts times to find the work item.
-    Returns the work item dict if found, None otherwise.
-    """
-    for attempt in range(max_attempts):
+    """Poll /incidents to find a work item for the given component_id."""
+    for _ in range(max_attempts):
         await asyncio.sleep(1)
         try:
             r = await client.get("/incidents", timeout=5.0)
@@ -219,20 +226,13 @@ async def run_wave(
     wave_number: int,
     results: list,
 ) -> None:
-    """
-    Execute a single failure wave:
-    1. Wait pause_before seconds
-    2. Send count signals
-    3. Verify work item creation
-    4. Append result to results list
-    """
+    """Execute a single failure wave: wait → send signals → verify work item."""
     signal = SIGNALS[component_type]
     component_id = signal["component_id"]
-    priority = signal["severity"]
 
     banner(
         f"Wave {wave_number} — {component_id:<30} [{component_type}]",
-        "─"
+        "─",
     )
     print(f"  {description}")
     print(f"  Firing {count} signals concurrently…")
@@ -241,16 +241,16 @@ async def run_wave(
         for remaining in range(pause_before, 0, -1):
             print(f"\r  Starting in {remaining:2d}s…", end="", flush=True)
             await asyncio.sleep(1)
-        print(f"\r  Starting now.                 ")
+        print("\r  Starting now.                 ")
 
     start = time.perf_counter()
     counts = await send_signals(client, signal, count)
     elapsed = time.perf_counter() - start
 
-    accepted = counts.get(202, 0)
+    accepted     = counts.get(202, 0)
     rate_limited = counts.get(429, 0)
     backpressure = counts.get(503, 0)
-    errors = counts.get(0, 0)
+    errors       = counts.get(0, 0)
 
     print(f"\n  Sent {count} signals in {elapsed:.2f}s")
     print(f"  ✓ Accepted     : {accepted}")
@@ -280,29 +280,99 @@ async def run_wave(
         results.append(None)
 
 
+# ── Correlation backfill ──────────────────────────────────────────────────────
+
+async def backfill_correlations() -> int:
+    """Find and create correlations for all existing open/investigating/resolved incidents."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(WorkItem).where(
+                WorkItem.status.in_([
+                    WorkItemStatus.OPEN,
+                    WorkItemStatus.INVESTIGATING,
+                    WorkItemStatus.RESOLVED,
+                ])
+            )
+        )
+        all_incidents = result.scalars().all()
+
+        log.info("backfill_started", total_incidents=len(all_incidents))
+        correlations_created = 0
+
+        for incident in all_incidents:
+            upstream_dependencies = _get_upstream_dependencies(incident.component_type.value)
+            if not upstream_dependencies:
+                continue
+
+            for upstream_component in upstream_dependencies:
+                upstream_result = await session.execute(
+                    select(WorkItem).where(
+                        (WorkItem.component_type == ComponentType(upstream_component))
+                        & (WorkItem.status.in_([
+                            WorkItemStatus.OPEN,
+                            WorkItemStatus.INVESTIGATING,
+                            WorkItemStatus.RESOLVED,
+                        ]))
+                    )
+                )
+                upstream_incidents = upstream_result.scalars().all()
+
+                for upstream_incident in upstream_incidents:
+                    # Skip if correlation already exists
+                    existing = await session.execute(
+                        select(IncidentCorrelation).where(
+                            (IncidentCorrelation.root_incident_id == upstream_incident.id)
+                            & (IncidentCorrelation.cascaded_incident_id == incident.id)
+                        )
+                    )
+                    if existing.scalar_one_or_none():
+                        continue
+
+                    correlation = IncidentCorrelation(
+                        id=str(ulid.new()),
+                        root_incident_id=upstream_incident.id,
+                        cascaded_incident_id=incident.id,
+                        correlation_reason=(
+                            f"{upstream_component} failure detected before "
+                            f"this {incident.component_type.value} incident"
+                        ),
+                    )
+                    session.add(correlation)
+                    correlations_created += 1
+
+                    log.info(
+                        "correlation_created",
+                        root_incident_id=upstream_incident.id,
+                        cascaded_incident_id=incident.id,
+                        root_component=upstream_component,
+                    )
+
+        await session.commit()
+        log.info("backfill_completed", correlations_created=correlations_created)
+        return correlations_created
 
 
-# ── Main simulation ──────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
     """
-    Main simulation loop:
-    1. Health check
-    2. Run all 6 cascading failure waves
-    3. Generate comprehensive summary
+    1. Health check the API server.
+    2. Run all 6 cascading failure waves.
+    3. Print the simulation summary.
+    4. Backfill correlations for all open incidents.
     """
-    banner("IMS Full-Stack Outage Simulation", "=")
+    banner("IMS Full-Stack Outage Simulation + Correlation Backfill", "=")
     print(f"  Scenario : Cascading failure from RDBMS outage")
     print(f"  Target   : {BASE_URL}")
     print(f"  Dashboard: {DASHBOARD}")
     print(f"  Time     : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print()
-    print(f"  Components (all six types):")
+    print("  Components (all six types):")
     for comp_type, count, _, desc in WAVES:
         sig = SIGNALS[comp_type]
         print(f"    [{sig['severity']}] {sig['component_id']:<30} {count:>3} signals")
 
-    # ── Pre-flight check ─────────────────────────────────
+    # ── Pre-flight check ──────────────────────────────────────────────────────
     step("Checking server health…")
     async with httpx.AsyncClient(base_url=BASE_URL) as client:
         try:
@@ -314,56 +384,41 @@ async def main():
                 return
             ok("Server healthy")
             for store, up in health.get("stores", {}).items():
-                status = "✓" if up else "✗"
-                info(f"{status} {store}")
+                info(f"{'✓' if up else '✗'} {store}")
         except Exception as e:
             print(f"\n  ✗ Cannot reach server: {e}")
             print("    Start uvicorn first: uvicorn main:app --reload --port 8000")
             return
 
-    # ── Run all waves ─────────────────────────────────────
-    results = []
+    # ── Run all failure waves ─────────────────────────────────────────────────
+    results: list = []
     async with httpx.AsyncClient(base_url=BASE_URL) as client:
-        for wave_num, (component_type, count, pause, description) in enumerate(WAVES, 1):
-            await run_wave(
-                client,
-                component_type,
-                count,
-                pause,
-                description,
-                wave_num,
-                results
-            )
+        for wave_num, (comp_type, count, pause, description) in enumerate(WAVES, 1):
+            await run_wave(client, comp_type, count, pause, description, wave_num, results)
 
-    # ════════════════════════════════════════════════════
-    # SUMMARY — Full-stack coverage report
-    # ════════════════════════════════════════════════════
+    # ── Simulation summary ────────────────────────────────────────────────────
     banner("Simulation Complete — Full Stack Covered", "=")
 
-    total_signals = sum(w[1] for w in WAVES)
+    total_signals      = sum(w[1] for w in WAVES)
     work_items_created = sum(1 for r in results if r is not None)
 
     print(f"  Total signals fired  : {total_signals}")
     print(f"  Work items created   : {work_items_created} / {len(WAVES)}")
     print(f"  Debounce ratio       : {total_signals}:1 → {work_items_created} incidents")
-
     print()
-    print(f"  Stack Coverage:")
-    print(f"  " + "─" * 66)
+    print("  Stack Coverage:")
+    print("  " + "─" * 66)
     print(f"  {'#':<3} {'Priority':<5} {'Component ID':<30} {'Type':<12} {'Status':<12}")
-    print(f"  " + "─" * 66)
-
-    for i, ((comp_type, count, _, _), wi) in enumerate(zip(WAVES, results), 1):
-        sig = SIGNALS[comp_type]
+    print("  " + "─" * 66)
+    for i, ((comp_type, _, _, _), wi) in enumerate(zip(WAVES, results), 1):
+        sig    = SIGNALS[comp_type]
         status = "✓ Created " if wi else "✗ Missing "
         print(f"  {i:<3} {sig['severity']:<5} {sig['component_id']:<30} {comp_type:<12} {status:<12}")
-
-    print(f"  " + "─" * 66)
+    print("  " + "─" * 66)
 
     print()
-    print(f"  Evaluator Workflow:")
+    print("  Evaluator Workflow:")
     print()
-
     for i, ((comp_type, _, _, _), wi) in enumerate(zip(WAVES, results), 1):
         if wi:
             sig = SIGNALS[comp_type]
@@ -372,14 +427,22 @@ async def main():
             print(f"     Type : {sig['component_type']} (Priority: {sig['severity']})")
             print()
 
-    print(f"  For each incident:")
-    print(f"    → Click to open detail page")
-    print(f"    → Change status: OPEN → INVESTIGATING → RESOLVED")
-    print(f"    → Submit RCA (auto-calculates MTTR)")
-    print(f"    → System closes incident (RESOLVED → CLOSED)")
+    print("  For each incident:")
+    print("    → Click to open detail page")
+    print("    → Change status: OPEN → INVESTIGATING → RESOLVED")
+    print("    → Submit RCA (auto-calculates MTTR)")
+    print("    → System closes incident (RESOLVED → CLOSED)")
     print()
     print(f"  API Documentation: {BASE_URL}/docs")
-    print(f"  Health Endpoint   : {BASE_URL}/health")
+    print(f"  Health Endpoint  : {BASE_URL}/health")
+
+    # ── Correlation backfill ──────────────────────────────────────────────────
+    banner("Backfilling Correlations for Open Incidents", "─")
+    step("Querying all open / investigating / resolved incidents…")
+
+    count = await backfill_correlations()
+
+    ok(f"Created {count} correlation record{'s' if count != 1 else ''}")
     print()
 
 

@@ -29,6 +29,7 @@ TIMELINE_FEATURE.md
 test_timeline_collection.py
 CORRELATION_FEATURE.md
 CONCURRENCY_PATTERNS.md
+backfill_correlations.py
 
 # Virtual environments
 venv/
@@ -36,6 +37,7 @@ env/
 ENV/
 env.bak/
 venv.bak/
+
 
 # IDE
 .vscode/

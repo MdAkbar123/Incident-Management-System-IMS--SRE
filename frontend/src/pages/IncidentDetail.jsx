@@ -226,6 +226,71 @@ export default function IncidentDetail() {
         </div>
       </div>
 
+      {/* Correlation — cascaded FROM a root incident */}
+      {incident.correlation && (
+        <div className="card" style={{
+          marginBottom: 24,
+          borderLeft: '3px solid var(--color-warning, #f59e0b)',
+          background: 'var(--bg-warning-subtle, rgba(245,158,11,0.06))',
+        }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
+            ⚠ Cascaded incident
+          </h2>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+            This incident was likely triggered by a failure in an upstream component.
+          </p>
+          <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr',
+                       gap: '8px 20px', fontSize: 14 }}>
+            <dt style={{ color: 'var(--text-muted)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+              Root incident
+            </dt>
+            <dd>
+              <Link to={`/incidents/${incident.correlation.is_cascaded_from}`}
+                    style={{ fontFamily: 'monospace', fontSize: 13 }}>
+                {incident.correlation.is_cascaded_from}
+              </Link>
+            </dd>
+            <dt style={{ color: 'var(--text-muted)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+              Root component
+            </dt>
+            <dd>{incident.correlation.root_component}</dd>
+            <dt style={{ color: 'var(--text-muted)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+              Reason
+            </dt>
+            <dd style={{ fontSize: 13 }}>{incident.correlation.reason}</dd>
+          </dl>
+        </div>
+      )}
+
+      {/* Correlation — this is the root; show what it caused */}
+      {incident.cascaded_incidents?.length > 0 && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
+            Cascaded incidents ({incident.cascaded_incidents.length})
+          </h2>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+            The following incidents were correlated as downstream effects of this one.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {incident.cascaded_incidents.map(cascadedId => (
+              <Link
+                key={cascadedId}
+                to={`/incidents/${cascadedId}`}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  fontSize: 13, fontFamily: 'monospace',
+                  padding: '6px 10px', borderRadius: 6,
+                  background: 'var(--bg-subtle, rgba(0,0,0,0.04))',
+                  color: 'inherit', textDecoration: 'none',
+                }}
+              >
+                ↳ {cascadedId}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Timeline visualization
       {timeline && (
         <TimelineVisualization timelineData={timeline} />
