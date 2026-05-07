@@ -34,11 +34,11 @@ Serves live incident dashboards directly from Redis sorted sets to reduce databa
 
 # 🏗️ System Architecture
 
-![alt text](<Screenshot from 2026-05-06 15-07-24-1.png>)
+![alt text](<architecture diag 1.png>)
 
 <br>
 
-![alt text](<Screenshot from 2026-05-06 14-13-20-1 copy.png>)
+![alt text](<architecture diag 2.png>)
 
 ---
 
@@ -165,7 +165,7 @@ This starts:
 # 3️⃣ Run Database Migrations
 
 ```bash
-cd backend && alemibc upgrade head
+cd backend && alembic upgrade head
 ```
 
 ---
